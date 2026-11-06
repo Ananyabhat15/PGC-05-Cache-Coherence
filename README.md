@@ -1,9 +1,5 @@
 # Experiment 4: Cache Coherence (MSI, MESI, MOESI) and NUMA Memory Access Performance
 
-![C](https://img.shields.io/badge/C-OpenMP-blue)
-![Python](https://img.shields.io/badge/Python-3-yellow)
-![Platform](https://img.shields.io/badge/Platform-Ubuntu%2022.04%20(VMware)-orange)
-![Topic](https://img.shields.io/badge/Topic-Parallel%20Computing-green)
 
 A hands-on study of how cache coherence protocols keep multi-core caches consistent, and how **false sharing** and **NUMA memory placement** affect performance. One simple example is used throughout: **two threads, each incrementing its own counter**, with the two counters placed either on the **same cache line** (adjacent) or on **separate cache lines** (padded).
 
@@ -14,16 +10,14 @@ A hands-on study of how cache coherence protocols keep multi-core caches consist
 1. [Objective](#1-objective)
 2. [Software Requirements](#2-software-requirements)
 3. [Theory](#3-theory)
-4. [Diagrams](#4-diagrams)
-5. [Installation and Setup](#5-installation-and-setup)
-6. [Repository Structure](#6-repository-structure)
-7. [Programs and Compilation](#7-programs-and-compilation)
-8. [Comparison Program](#8-comparison-program-scalability--execution-time)
-9. [Execution Steps](#9-execution-steps)
-10. [Sample Output and Results](#10-sample-output-and-results)
-11. [Observation / Comparison Table](#11-observation--comparison-table)
-12. [Conclusion](#12-conclusion)
-13. [Appendix A: coherence_sim.py](#appendix-a-coherence_simpy)
+4. [Installation and Setup](#4-installation-and-setup)
+5. [Repository Structure](#5-repository-structure)
+6. [Programs and Compilation](#6-programs-and-compilation)
+7. [Comparison Program](#7-comparison-program-scalability--execution-time)
+8. [Results](#8-results)
+9. [Observation](#9-observation)
+10. [Conclusion](#10-conclusion)
+11. [Appendix A: coherence_sim.py](#appendix-a-coherence_simpy)
 
 ---
 
@@ -54,45 +48,15 @@ The experiment measures **correctness**, **execution time** and **scalability** 
 
 ## 3. Theory
 
-### 3.1 Why Cache Coherence is Needed
-
-In a multi-core processor every core has its own private cache. If two cores load the same memory location, each holds its own copy. When one core writes to its copy, the other core's copy becomes **stale**. Without coordination, the cores would see different values for the same variable.
-
-A **cache coherence protocol** is the hardware mechanism that guarantees all cores see a single consistent value for every memory location. In a **snooping protocol**, each cache watches (*snoops*) the shared bus or interconnect and reacts to the reads and writes of the other caches.
-
-### 3.2 Cache Line and False Sharing
-
-Coherence is tracked **per cache line** (typically 64 bytes), not per variable. If two threads write to two different variables that happen to lie on the same cache line, each write invalidates the other core's copy of the whole line, even though the threads never touch each other's data. The line bounces back and forth between the cores. This is called **false sharing**.
-
-- It produces **correct** results but destroys **performance and scalability**.
-- The usual fix is **padding or alignment**, so that each thread's data sits on its own cache line.
-
-### 3.3 MSI Protocol
-
-MSI has three states per cache line:
-
-- **Modified (M)**: this cache has the only valid copy and it differs from memory.
-- **Shared (S)**: one or more caches hold a clean copy.
-- **Invalid (I)**: the copy is not valid.
-
-Bus operations:
-
-- A read miss issues a bus read (`BusRd`).
-- A write to a Shared line issues an upgrade (`BusUpgr`) that invalidates the other copies.
-- A write miss issues a read-for-ownership (`BusRdX`).
-- If another cache holds the line Modified, it must **write the line back to memory** before the line is shared.
-
-In MSI even a line that no other cache holds must be upgraded on its first write, which costs a bus transaction.
-
-### 3.4 MESI Protocol
-
-MESI adds the **Exclusive (E)** state: the cache holds the only copy and it is clean. A core that reads a line nobody else has loads it as Exclusive. A later write moves it to Modified **silently** (E to M), with no bus transaction. This removes the upgrade cost for private data, which is the common case. Other behaviour is the same as MSI, including the write-back to memory when a Modified line is read by another core.
-
-### 3.5 MOESI Protocol
-
-MOESI adds the **Owned (O)** state: the cache holds a dirty line that other caches may also hold as Shared. The owner supplies the data directly to other caches (**cache-to-cache transfer**) and memory is not updated, so the write-back to memory that MSI and MESI need when a Modified line is read is avoided.
-
-Intel processors use a MESI variant (MESIF) and AMD processors use a MOESI variant, so real hardware cannot be switched between these protocols. This is why the experiment uses a **simulator** for the protocol comparison.
+- **Cache coherence:** every core has a private cache, so a write by one core can leave stale copies in the others. A coherence protocol (snooping the shared bus) guarantees all cores see one consistent value per memory location.
+- **Cache line and false sharing:** coherence is tracked per **cache line** (typically 64 bytes), not per variable. Two threads writing different variables on the **same line** keep invalidating each other's copy, so the line ping-pongs between cores. Results stay correct but performance and scalability drop. Fix: **padding/alignment** so each thread's data has its own line.
+- **Protocols:**
+  - **MSI**: states Modified, Shared, Invalid. A private line still needs a bus upgrade before its first write.
+  - **MESI**: adds **Exclusive** (only copy, clean), so a first write to private data is a silent E to M with no bus transaction.
+  - **MOESI**: adds **Owned** (dirty, shared); the owner supplies data cache to cache, so no write-back to memory is needed.
+  - Intel uses a MESI variant (MESIF) and AMD a MOESI variant, so real hardware cannot be switched between protocols. A **simulator** is used for the comparison.
+- **NUMA:** memory is split between nodes (usually one per socket). Local access is faster than remote access across the interconnect. Linux uses **first-touch** placement; `numactl --cpunodebind=N --membind=N` overrides it. On a single-socket PC (even with virtual NUMA nodes in VMware) little or no local/remote difference is expected.
+- **Expected outcome:** all protocols are correct and differ only in bus traffic. Adjacent counters should scale poorly; padded counters should scale well.
 
 | State | Meaning | Memory up to date? | Other caches may hold it? |
 |-------|---------|--------------------|---------------------------|
@@ -102,98 +66,19 @@ Intel processors use a MESI variant (MESIF) and AMD processors use a MOESI varia
 | **S** (Shared) | Clean copy, possibly several | Yes (or owner holds newer) | Yes |
 | **I** (Invalid) | Not valid | - | - |
 
-### 3.6 NUMA (Non-Uniform Memory Access)
-
-In a NUMA system the memory is divided between **nodes** (usually one node per processor socket). A core reaches the RAM attached to its own node (**local access**) faster than the RAM of another node (**remote access**), which has to cross the interconnect.
-
-- Linux normally places a page on the node of the thread that first touches it (**first-touch policy**).
-- `numactl` can override this: `--cpunodebind=N` runs threads on node N and `--membind=N` allocates memory on node N.
-- Coherence traffic also crosses the interconnect, so false sharing between threads on **different** nodes is typically more costly than between threads on the same node.
-
-> **Note:** On a single-socket PC, a VMware guest can be configured to show virtual NUMA nodes, but both nodes are backed by the same physical memory, so little or no local-versus-remote difference should be expected there.
-
-### 3.7 Correctness vs. Performance vs. Scalability
-
-All three protocols are **correct**: they guarantee a consistent view of memory. They differ in the amount of **bus traffic** they generate. *Performance* is the execution time for a given number of threads, and *scalability* is whether the time falls as threads are added.
-
-In this experiment the counters are always correct, but the **adjacent** layout is expected to scale poorly because of coherence traffic, while the **padded** layout is expected to scale well. NUMA placement mainly affects memory-bound code.
-
 ---
 
-## 4. Diagrams
+## 4. Installation and Setup
 
-### Fig. 1: Cache coherence and NUMA in a two-node system
+### 4.1 Create the Virtual Machine
 
-```mermaid
-flowchart LR
-    subgraph N0["NUMA Node 0"]
-        direction TB
-        C0["Core 0"] --> L0["L1 cache"]
-        C1["Core 1"] --> L1["L1 cache"]
-        L0 --> B0["Snooping bus (coherence)"]
-        L1 --> B0
-        B0 --> R0[("RAM 0")]
-    end
-    subgraph N1["NUMA Node 1"]
-        direction TB
-        C2["Core 2"] --> L2["L1 cache"]
-        C3["Core 3"] --> L3["L1 cache"]
-        L2 --> B1["Snooping bus (coherence)"]
-        L3 --> B1
-        B1 --> R1[("RAM 1")]
-    end
-    N0 <== "Interconnect (remote access)" ==> N1
-```
+1. Install **VMware Workstation Pro** (from the official Broadcom/VMware site).
+2. Create a new VM (Typical) from the **Ubuntu 22.04 LTS** ISO with **4 CPU cores (2 processors x 2 cores)**, **4 GB RAM** and 20 GB+ disk. Multiple cores are needed to see coherence and scalability effects.
+3. Install Ubuntu ("Erase disk and install Ubuntu" only affects the virtual disk), then power the VM off.
 
-*Local access: a core reading RAM of its own node is fast. Core 0 reading RAM 1 is remote (slower).*
+### 4.2 Expose Two Virtual NUMA Nodes (VMware)
 
-### Fig. 2: The two-counter example (one 64-byte cache line = 8 slots of 8 bytes)
-
-```text
-Adjacent      [ x | y |   |   |   |   |   |   ]   <- ONE line: x (core 0) and y (core 1)
-                                                     share it, every write invalidates
-                                                     the other core's copy
-
-Padded: A     [ x |   |   |   |   |   |   |   ]   <- x alone on line A
-Padded: B     [ y |   |   |   |   |   |   |   ]   <- y alone on line B, no invalidations
-```
-
-> You can replace these with exported images: `![Fig 1](images/fig1_numa.png)` and `![Fig 2](images/fig2_two_counter.png)`.
-
----
-
-## 5. Installation and Setup
-
-### 5.1 Install VMware Workstation Pro
-
-1. Download VMware Workstation Pro from the official Broadcom/VMware website for your host OS.
-2. Run the installer and follow the setup wizard, accepting the license agreement.
-3. Choose the installation location and finish the installation (enter a license key if prompted, or use the free version for personal use).
-4. Launch VMware Workstation Pro once installation completes.
-
-### 5.2 Create a New Virtual Machine
-
-5. Open VMware Workstation and click **Create a New Virtual Machine**.
-6. Select **Typical (recommended)** configuration and click Next.
-7. Browse to the Ubuntu 22.04 LTS ISO file (downloaded from ubuntu.com) as the installer disc image.
-8. Enter a VM name and choose a storage location on the host disk.
-9. Allocate disk space (20 GB or more recommended).
-10. Under **Customize Hardware**, allocate **4 CPU cores (2 processors with 2 cores each)** and **4 GB RAM**. Multiple cores are needed to see coherence and scalability effects; menu names differ slightly between VMware versions.
-11. Click **Finish** to create the VM.
-
-### 5.3 Install Ubuntu 22.04 LTS
-
-12. Power on the VM; it boots from the Ubuntu ISO.
-13. Select **Install Ubuntu**, choose language and keyboard layout.
-14. Choose **Erase disk and install Ubuntu** (this affects only the virtual disk).
-15. Set time zone, create a username and password, and continue.
-16. Restart the VM when installation finishes and remove the installation media.
-17. Log in to the new Ubuntu desktop, then power the VM off (needed for the next section).
-
-### 5.4 Expose Two Virtual NUMA Nodes (VMware)
-
-18. With the VM powered off, open its `.vmx` file in Notepad (it is in the VM storage folder chosen in step 8).
-19. Add or edit these lines, save the file and power the VM on:
+With the VM powered off, add or edit these lines in its `.vmx` file, save, and power the VM on:
 
 ```ini
 numvcpus = "4"
@@ -202,68 +87,54 @@ numa.vcpu.min = "2"
 numa.vcpu.maxPerVirtualNode = "2"
 ```
 
-> These are VMware advanced settings and their effect can depend on the VMware version. Step 23 verifies the result. If only one NUMA node appears, continue with the false-sharing part of the experiment and run the NUMA part on a multi-socket machine.
-
-### 5.5 Install GCC, OpenMP, numactl and Python
-
-20. Open a Terminal (`Ctrl+Alt+T`) and update the package index:
+### 4.3 Install Tools and Verify
 
 ```bash
 sudo apt update
-```
-
-21. Install `build-essential` (GCC, G++, Make and `libgomp`, the OpenMP runtime), `numactl`, `hwloc` and Python 3:
-
-```bash
 sudo apt install build-essential numactl hwloc python3 -y
-```
 
-22. Verify GCC and OpenMP support:
 
-```bash
+# verify GCC and OpenMP
 gcc --version
 echo '#include <omp.h>' | gcc -E -fopenmp -xc - > /dev/null && echo OpenMP OK
-```
 
-23. Verify the CPU layout and the NUMA nodes, and note which CPU numbers belong to node 0 and node 1:
 
-```bash
+# verify CPU layout and NUMA nodes (note which CPUs belong to node 0 and node 1)
 lscpu | grep -E "Socket|Core|Thread|NUMA"
 numactl --hardware
 lscpu -e
+
 ```
+<img width="1277" height="807" alt="WhatsApp Image 2026-11-06 at 10 55 11 AM" src="https://github.com/user-attachments/assets/1afeb828-0e94-420a-98e1-930b579bc4e3" />
+<img width="1219" height="767" alt="build-essentials" src="https://github.com/user-attachments/assets/b7c6d514-10d7-454d-9860-61165f7ca064" />
 
-> **Note for steps 19 and 23:** a normal desktop or laptop PC has a single socket. Even if `numactl` shows two nodes inside the VM, expect similar local and remote times there. A real remote-memory penalty needs a multi-socket machine.
+<img width="1213" height="767" alt="check installation" src="https://github.com/user-attachments/assets/d9f47556-9211-4172-9df0-eba7795e950c" />
 
-**Screenshot: VM configuration, `gcc --version`, `OpenMP OK`, and the `lscpu` / `numactl --hardware` output**
 
-> 📸 `images/setup_verification.png`
->
-> ![Setup verification](images/setup_verification.png)
 
 ---
 
-## 6. Repository Structure
+## 5. Repository Structure
 
 ```text
 .
 ├── README.md
-├── coherence_sim.py        # Program 1 - MSI / MESI / MOESI simulator
-├── false_sharing.c         # Program 2 - adjacent vs padded counters
-├── numa_sweep.c            # Program 3 - NUMA memory sweep
-├── compare_numa.c          # Program 4 - combined comparison benchmark
-└── images/                 # Screenshots and figures
+├── coherence_sim.py        
+├── false_sharing.c         
+├── numa_sweep.c            
+├── compare_numa.c          
+└── images/                 
 ```
 
 ---
 
-## 7. Programs and Compilation
+## 6. Programs and Compilation
 
 Each program demonstrates one part of the example. Program 1 compares the three coherence protocols using the two-counter trace. Programs 2 and 3 measure false sharing and NUMA memory access on the real machine.
 
-### 7.1 Program 1: Protocol Simulator (MSI, MESI, MOESI)
+### 6.1 Program 1: Protocol Simulator (MSI, MESI, MOESI)
 
-The simulator models two cores and runs this trace many times: **core 0 reads and writes `x`, then core 1 reads and writes `y`**. With the *adjacent* layout `x` and `y` share cache line A; with the *padded* layout they use lines A and B. It prints the line states after each operation and counts bus transactions, write-backs to memory and cache-to-cache transfers. The full listing is in [Appendix A](#appendix-a-coherence_simpy) and is also supplied as `coherence_sim.py`.
+The simulator models two cores and runs this trace many times: **core 0 reads and writes `x`, then core 1 reads and writes `y`**. With the *adjacent* layout `x` and `y` share cache line A; with the *padded* layout they use lines A and B. It prints the line states after each operation and counts bus transactions, write-backs to memory and cache-to-cache transfers. 
 
 **Run:**
 
@@ -271,13 +142,12 @@ The simulator models two cores and runs this trace many times: **core 0 reads an
 python3 coherence_sim.py 1000
 ```
 
-**Screenshot: simulator output (state trace and totals table)**
 
-> 📸 `images/program1_simulator.png`
->
-> ![Program 1 output](images/program1_simulator.png)
+<img width="1214" height="762" alt="coherence_sim" src="https://github.com/user-attachments/assets/bf095f1f-f358-4e93-ba76-2a2605463174" />
+<img width="1275" height="684" alt="moesi" src="https://github.com/user-attachments/assets/6deabf0d-7ebd-4ef4-a3a7-d21e72123095" />
 
-### 7.2 Program 2: False Sharing (Adjacent vs Padded)
+
+### 6.2 Program 2: False Sharing (Adjacent vs Padded)
 
 **`false_sharing.c`**
 
@@ -321,13 +191,10 @@ OMP_NUM_THREADS=2 ./false_sharing adjacent
 OMP_NUM_THREADS=2 ./false_sharing padded
 ```
 
-**Screenshot: Program 2 output (adjacent and padded, 3 runs each)**
+<img width="1214" height="550" alt="fale sharing" src="https://github.com/user-attachments/assets/dbb6e780-f562-4ea5-a05e-4be36a491a7c" />
 
-> 📸 `images/program2_false_sharing.png`
->
-> ![Program 2 output](images/program2_false_sharing.png)
 
-### 7.3 Program 3: NUMA Memory Sweep
+### 6.3 Program 3: NUMA Memory Sweep
 
 **`numa_sweep.c`**
 
@@ -367,22 +234,19 @@ OMP_NUM_THREADS=2 numactl --cpunodebind=0 --membind=0 ./numa_sweep
 OMP_NUM_THREADS=2 numactl --cpunodebind=0 --membind=1 ./numa_sweep
 ```
 
-**Screenshot: Program 3 output (local and remote memory)**
+<img width="1214" height="550" alt="fale sharing" src="https://github.com/user-attachments/assets/8eb27fa8-860b-424c-9263-7a38bd199a36" />
 
-> 📸 `images/program3_numa_sweep.png`
->
-> ![Program 3 output](images/program3_numa_sweep.png)
 
 ---
 
-## 8. Comparison Program: Scalability & Execution Time
+## 7. Comparison Program: Scalability & Execution Time
 
 Program 4 combines Programs 2 and 3 in one benchmark.
 
 - **Table 1** repeats the same 100,000,000-increment workload for the adjacent and padded layouts with 1, 2 and 4 threads, checking the final total against the expected value.
 - **Table 2** times the 512 MB memory sweep with 1 and 2 threads.
 
-Run it normally, then under `numactl` with local and remote memory (see [Execution Steps](#9-execution-steps)). This single program produces the data used in Sections 10 and 11.
+
 
 **`compare_numa.c`**
 
@@ -464,193 +328,107 @@ gcc -O2 compare_numa.c -fopenmp -o compare_numa
 ```bash
 ./compare_numa
 ```
+<img width="1222" height="471" alt="compare numa" src="https://github.com/user-attachments/assets/67b79488-b83c-41fb-b956-d4a7a6176ebd" />
+<img width="1214" height="422" alt="compare_numa1" src="https://github.com/user-attachments/assets/5ccc4911-40d6-4c89-bec4-88e306b1b49e" />
+<img width="1216" height="414" alt="omp 2 threads" src="https://github.com/user-attachments/assets/ed0fbe10-0b45-4cce-8e6d-b1901b1d303c" />
 
-**Screenshot: Program 4 output with default placement (Tables 1 and 2)**
-
-> 📸 `images/program4_default.png`
->
-> ![Program 4 default](images/program4_default.png)
-
-**Screenshot: Program 4 output with local memory (`--cpunodebind=0 --membind=0`)**
-
-> 📸 `images/program4_local.png`
->
-> ![Program 4 local](images/program4_local.png)
-
-**Screenshot: Program 4 output with remote memory (`--cpunodebind=0 --membind=1`)**
-
-> 📸 `images/program4_remote.png`
->
-> ![Program 4 remote](images/program4_remote.png)
 
 ---
 
-## 9. Execution Steps
+### 8. Results
 
-| Step | Command | Purpose |
-|:----:|---------|---------|
-| 1 | `sudo apt update && sudo apt install build-essential numactl hwloc python3 -y` | Install GCC, the OpenMP runtime, numactl and Python |
-| 2 | `numactl --hardware ; lscpu -e` | List NUMA nodes and which CPU numbers belong to each |
-| 3 | `nano coherence_sim.py` (repeat for each source file) | Create or paste each program's source code |
-| 4 | `python3 coherence_sim.py 1000` | Part A: run the MSI / MESI / MOESI simulation |
-| 5 | `gcc -O2 false_sharing.c -fopenmp -o false_sharing` | Compile Program 2 |
-| 6 | `gcc -O2 numa_sweep.c -fopenmp -o numa_sweep` | Compile Program 3 |
-| 7 | `gcc -O2 compare_numa.c -fopenmp -o compare_numa` | Compile the comparison program |
-| 8 | `OMP_NUM_THREADS=2 ./false_sharing adjacent`<br>`OMP_NUM_THREADS=2 ./false_sharing padded` | Part B1: false sharing with 2 threads (repeat 3 times) |
-| 9 | `./compare_numa` | Tables 1 and 2 with default placement |
-| 10 | `numactl --cpunodebind=0 --membind=0 ./compare_numa` | Part B2: threads and memory on node 0 (local) |
-| 11 | `numactl --cpunodebind=0 --membind=1 ./compare_numa` | Part B2: threads on node 0, memory on node 1 (remote) |
-| 12 | `OMP_NUM_THREADS=2 taskset -c 0,2 ./false_sharing adjacent` | Optional: one thread on each node (use CPU numbers from step 2) |
+**Test system:** VMware Ubuntu 22.04 guest, 4 vCPUs, 2 virtual NUMA nodes (from `numactl --hardware`).
 
-> **Tips:** Run each configuration **three times** and keep the **median** time. Choose CPUs on different physical cores, and close other programs so that the VM stays idle.
+| Node | CPUs | Size | Distance to node 0 | Distance to node 1 |
+|:----:|:----:|:----:|:------------------:|:------------------:|
+| 0 | 0, 1 | 3165 MB | 10 | 20 |
+| 1 | 2, 3 | 3274 MB | 20 | 10 |
 
-You can also set the thread count as an environment variable before running any OpenMP program:
+#### Table 1: False sharing (`compare_numa`, 100,000,000 increments in total)
 
-```bash
-export OMP_NUM_THREADS=4
-./false_sharing padded
-```
+The final count was `100000000` and the correctness check printed **Correct** in every run. Times are in seconds.
 
-**Screenshot (optional): one thread on each node using `taskset`**
+| Layout | Threads | Default placement | Local (`--cpunodebind=0 --membind=0`) | Remote (`--cpunodebind=0 --membind=1`) |
+|--------|:-------:|:-----------------:|:-------------------------------------:|:--------------------------------------:|
+| adjacent | 1 | 0.0233 | 0.0220 | 0.0223 |
+| padded | 1 | 0.0220 | 0.0220 | 0.0215 |
+| adjacent | 2 | 0.0142 | 0.0151 | 0.0154 |
+| padded | 2 | 0.0111 | 0.0111 | 0.0122 |
+| adjacent | 4 | 0.0065 | 0.0155 | 0.0160 |
+| padded | 4 | 0.0058 | 0.0132 | 0.0126 |
 
-> 📸 `images/optional_taskset.png`
->
-> ![taskset output](images/optional_taskset.png)
-
----
-
-## 10. Sample Output and Results
-
-### 10.1 Part A: Protocol Simulation (actual output of Program 1)
-
-State of cache line A in core 0 / core 1 after each operation, first two iterations, **adjacent** layout:
-
-| Operation | MSI (C0 / C1) | MESI (C0 / C1) | MOESI (C0 / C1) |
-|-----------|:-------------:|:--------------:|:---------------:|
-| core 0 reads its counter | S / I | E / I | E / I |
-| core 0 writes its counter | M / I | M / I | M / I |
-| core 1 reads its counter | S / S | S / S | O / S |
-| core 1 writes its counter | I / M | I / M | I / M |
-| core 0 reads its counter | S / S | S / S | S / O |
-| core 0 writes its counter | M / I | M / I | M / I |
-| core 1 reads its counter | S / S | S / S | O / S |
-| core 1 writes its counter | I / M | I / M | I / M |
-
-**Totals for 1000 iterations (4000 memory operations):**
-
-| Layout | Protocol | Bus tx | BusRd | RdX | Upgr | Inval. | WB | C2C | Silent E-M |
-|--------|----------|-------:|------:|----:|-----:|-------:|---:|----:|-----------:|
-| adjacent | MSI | 4000 | 2000 | 0 | 2000 | 1999 | 1999 | 0 | 0 |
-| adjacent | MESI | 3999 | 2000 | 0 | 1999 | 1999 | 1999 | 0 | 1 |
-| adjacent | MOESI | 3999 | 2000 | 0 | 1999 | 1999 | 0 | 1999 | 1 |
-| padded | MSI | 4 | 2 | 0 | 2 | 0 | 0 | 0 | 0 |
-| padded | MESI | 2 | 2 | 0 | 0 | 0 | 0 | 0 | 2 |
-| padded | MOESI | 2 | 2 | 0 | 0 | 0 | 0 | 0 | 2 |
-
-**Legend:**
-
-- **Bus tx** = total bus transactions (BusRd + RdX + Upgr)
-- **RdX** = BusRdX (write miss)
-- **Upgr** = BusUpgr (write to a shared line)
-- **Inval.** = copies invalidated
-- **WB** = forced write-back to memory
-- **C2C** = cache-to-cache transfers
-- **Silent E-M** = writes needing no bus transaction
-
-### 10.2 Part B: Output Format of the Comparison Program
-
-The timing values depend on the machine, the VM and the number of cores, so **record your own measurements**. The program prints tables in this format (`x.xxxx` is where your measured time appears):
-
-```text
-Table 1: false sharing (100000000 increments in total)
-Layout | Threads | Final Count | Correctness | Time (s)
----------------------------------------------------------
-adjacent | 1 | 100000000 | Correct | x.xxxx
-padded | 1 | 100000000 | Correct | x.xxxx
----------------------------------------------------------
-adjacent | 2 | 100000000 | Correct | x.xxxx
-padded | 2 | 100000000 | Correct | x.xxxx
----------------------------------------------------------
-adjacent | 4 | 100000000 | Correct | x.xxxx
-padded | 4 | 100000000 | Correct | x.xxxx
----------------------------------------------------------
-
-Table 2: memory sweep of 512 MB (4 passes)
-Threads | Time (s)
--------------------
- 1 | x.xxxx
- 2 | x.xxxx
-```
-
-### 10.3 Results to Record
-
-Fill in your measured median times (seconds):
-
-| Run | Time (s) |
-|-----|:--------:|
-| adjacent, 2 threads (Program 2) | |
-| padded, 2 threads (Program 2) | |
-| Table 2, memory LOCAL (`--membind=0`), 1 thread | |
-| Table 2, memory LOCAL (`--membind=0`), 2 threads | |
-| Table 2, memory REMOTE (`--membind=1`), 1 thread | |
-| Table 2, memory REMOTE (`--membind=1`), 2 threads | |
-| adjacent, one thread on each node (optional) | |
-
-**Ratios to report:**
-
-| Ratio | Meaning | Value |
-|-------|---------|:-----:|
-| adjacent / padded | Cost of false sharing | |
-| remote / local | Cost of NUMA placement | |
-
-**Table 1 (your measurements): false sharing**
-
-| Layout | Threads | Final Count | Correctness | Time (s) |
-|--------|:-------:|------------:|:-----------:|---------:|
-| adjacent | 1 | 100000000 | | |
-| padded | 1 | 100000000 | | |
-| adjacent | 2 | 100000000 | | |
-| padded | 2 | 100000000 | | |
-| adjacent | 4 | 100000000 | | |
-| padded | 4 | 100000000 | | |
-
-**Table 2 (your measurements): 512 MB memory sweep (4 passes)**
+#### Table 2: Memory sweep of 512 MB (`compare_numa`, 4 passes)
 
 | Placement | 1 thread (s) | 2 threads (s) |
 |-----------|:------------:|:-------------:|
-| Default | | |
-| Local (`--membind=0`) | | |
-| Remote (`--membind=1`) | | |
+| Default | 0.1178 | 0.1061 |
+| Local (`--membind=0`) | 0.1138 | 0.1036 |
+| Remote (`--membind=1`) | 0.1137 | 0.1101 |
+
+#### Program 2 (`false_sharing`, 2 threads) and Program 3 (`numa_sweep`)
+
+| Program | Configuration | Time (s) |
+|---------|---------------|:--------:|
+| Program 2 | adjacent, 2 threads | 0.0146 |
+| Program 2 | padded, 2 threads | 0.0130 |
+| Program 3 | local, 1 thread (single run) | 0.1083 |
+| Program 3 | remote, 1 thread (single run) | 0.1062 |
+| Program 3 | local, 2 threads (single run) | 0.0998 |
+| Program 3 | remote, 2 threads (single run) | 0.0970 |
+
+#### Program 3: three repeated runs per configuration
+
+| Configuration | Run 1 | Run 2 | Run 3 | Median (s) |
+|---------------|:-----:|:-----:|:-----:|:----------:|
+| Local, 1 thread | 0.1756 | 0.1570 | 0.1586 | **0.1586** |
+| Local, 2 threads | 0.1055 | 0.1120 | 0.1199 | **0.1120** |
+| Remote, 1 thread | 0.1100 | 0.1529 | 0.1109 | **0.1109** |
+| Remote, 2 threads | 0.0983 | 0.1248 | 0.1017 | **0.1017** |
+
+### Results Recorded
+
+| Run | Time (s) |
+|-----|:--------:|
+| adjacent, 2 threads (Program 2) | 0.0146 |
+| padded, 2 threads (Program 2) | 0.0130 |
+| Table 2, memory LOCAL (`--membind=0`), 1 thread | 0.1138 |
+| Table 2, memory LOCAL (`--membind=0`), 2 threads | 0.1036 |
+| Table 2, memory REMOTE (`--membind=1`), 1 thread | 0.1137 |
+| Table 2, memory REMOTE (`--membind=1`), 2 threads | 0.1101 |
+| adjacent, one thread on each node (optional) | Not run |
+
+**Ratios:**
+
+| Ratio | Measurement | Value |
+|-------|-------------|:-----:|
+| adjacent / padded (cost of false sharing) | Program 2, 2 threads (0.0146 / 0.0130) | **1.12** |
+| | Table 1, 2 threads, default (0.0142 / 0.0111) | 1.28 |
+| | Table 1, 4 threads, default (0.0065 / 0.0058) | 1.12 |
+| remote / local (cost of NUMA placement) | Table 2, 1 thread (0.1137 / 0.1138) | **1.00** |
+| | Table 2, 2 threads (0.1101 / 0.1036) | 1.06 |
+| | Program 3, 2 threads, median (0.1017 / 0.1120) | 0.91 |
+
+
+### 9. Observation
+
+- **Correctness:** every run produced the exact final count of 100,000,000. False sharing and NUMA placement changed only the time, never the result.
+- **False sharing:** the padded layout was faster than the adjacent layout in every multi-thread run, by about 1.1x to 1.3x. This is a mild penalty, because the runs last only about 6 to 25 ms and the guest is virtualized.
+- **Scalability:** with default placement, padded scaled almost ideally (1.98x on 2 threads, 3.79x on 4). Adjacent scaled less well (1.64x and 3.59x), which is the effect of the cache line moving between cores.
+- **Effect of `numactl --cpunodebind=0`:** node 0 owns only CPUs 0 and 1, so the 4-thread runs were squeezed onto 2 CPUs. Their times (0.0132 to 0.0160 s) did not improve over 2 threads, and are much higher than the default-placement 4-thread times (0.0058 to 0.0065 s). This slowdown comes from CPU oversubscription, not from NUMA.
+- **NUMA:** remote memory was not slower than local memory. The ratio was 1.00 for 1 thread and 1.06 for 2 threads, and the repeated Program 3 runs (0.098 to 0.176 s) show no consistent local-versus-remote ordering. This agrees with the expectation for a single-socket host: the two virtual nodes are backed by the same physical memory.
+- **Memory-bound code:** the 512 MB sweep barely scaled from 1 to 2 threads (0.1178 s to 0.1061 s, about 1.11x), so it is limited by memory bandwidth rather than by compute.
+- **Noise:** the repeated runs vary noticeably (for example 0.1570 to 0.1756 s for the same configuration), so small differences should be read with care.
 
 ---
 
-## 11. Observation / Comparison Table
+## 10. Conclusion
 
-| Case | Correctness | Relative Performance | Scalability |
-|------|:-----------:|----------------------|-------------|
-| **MSI** (simulated) | Correct | More bus traffic: even a private line needs an upgrade before its first write | Same traffic growth as MESI when lines are shared |
-| **MESI** (simulated) | Correct | Fewer transactions for private data (silent E to M) | Good for private data, same ping-pong on shared lines |
-| **MOESI** (simulated) | Correct | No forced write-back to memory; owner supplies the line cache to cache | Good; lowest memory traffic of the three |
-| **Adjacent counters** (false sharing) | Correct | Typically slower: the line bounces between cores | Typically poor; time does not fall as threads are added |
-| **Padded counters** | Correct | Typically fastest: each core keeps its line in M | Typically good; time falls as threads are added |
-| **Local memory** (NUMA) | Correct | Reference time for the memory sweep | Reference |
-| **Remote memory** (NUMA) | Correct | Typically slower on a multi-socket machine; about equal on a single-socket PC | Memory-bound code may scale worse |
+The experiment shows that cache coherence protocols keep multi-core caches **correct**, and that they differ only in the **bus traffic** they generate.
 
-> The entries marked *typically* describe the usual outcome on multi-core hardware; confirm them against your own measurements in [Section 10.3](#103-results-to-record).
-
----
-
-## 12. Conclusion
-
-All three protocols keep the caches correct; they differ in how much bus traffic they need.
-
-- The **simulation** shows that MESI saves the upgrade transaction for data that only one core uses, and that MOESI avoids writing a dirty line back to memory when another core reads it, by letting the owner supply the line directly.
-- The **two-counter example** shows that coherence works on whole cache lines: when two independent counters share a line, the line ping-pongs between the cores, which is false sharing, and padding the counters onto separate lines removes this cost.
-- **NUMA** adds a second effect: memory attached to another node is slower to reach, so threads and their memory should be placed on the same node (`numactl --cpunodebind` and `--membind`, or first-touch allocation).
-
-The choice of data layout and placement therefore matters as much as the choice of protocol for the scalability of a parallel program.
-
----
+- **Protocols (simulation):** MESI removes the upgrade transaction for private data (padded layout: 2 bus transactions for MESI and MOESI against 4 for MSI). MOESI avoids writing a dirty line back to memory when another core reads it (0 write-backs against 1999 for MSI and MESI in the adjacent layout), because the owner supplies the line cache to cache. With the adjacent layout all three protocols generated about 4000 bus transactions per 1000 iterations, against 2 to 4 with the padded layout.
+- **False sharing (measurement):** all runs were correct, but putting two independent counters on one cache line made them slower. The adjacent layout cost about 1.12x to 1.28x more time than the padded layout, and it scaled less well (3.59x against 3.79x on 4 threads). The effect was small in this virtual machine, but its direction matches the theory, and padding each counter to its own 64-byte line removes it.
+- **NUMA (measurement):** no remote-memory penalty appeared (remote / local about 1.00 to 1.06). The VM exposes two virtual nodes, but both are backed by the same physical memory of a single-socket machine, so a real local-versus-remote difference needs a multi-socket system. The experiment also showed that binding threads to a node with `--cpunodebind` limits them to that node's CPUs, which hurt the 4-thread runs.
+- **Overall:** data layout and thread placement matter as much as the choice of coherence protocol for the scalability of a parallel program. Keep each thread's data on its own cache line, and keep threads and their memory on the same NUMA node.
 
 ## Appendix A: coherence_sim.py
 
@@ -736,7 +514,3 @@ if __name__ == '__main__':
 ```
 
 ---
-
-## Author
-
-**Ananya**: Experiment 4, Cache Coherence and NUMA Memory Access Performance.
